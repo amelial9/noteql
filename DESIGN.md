@@ -12,24 +12,13 @@ citations.
 
 it exists because my notes are fragmented across obsidian, notion,
 and onenote, and no existing tool lets me ask "how did my linear
-algebra professor explain matrix multiplication a year ago" and get
+algebra professor explain matrix multiplication years ago" and get
 a useful answer. the tools that can search each silo don't understand
 structure (which class, when written, what it links to). the tools
 that could reason across everything (chatgpt, etc.) don't have access
 to my notes and don't cite. noteql is the thing in the middle.
 
-## who it's for
-
-right now: me. one user, one machine, my own vault. this scoping
-matters — it means i can make design decisions that assume a personal
-corpus (thousands of notes, not billions of documents; single-user
-ranking signals; local disk) instead of pretending to build web-scale
-infrastructure.
-
-later, maybe: other people with the same problem. but the v1 audience
-is one, on purpose.
-
-## the core bet
+## the core
 
 the interesting engineering in personal-knowledge tools is not the
 llm layer — it's the retrieval layer underneath. everyone is calling
@@ -39,10 +28,6 @@ projects in this space treat retrieval as "call a vector db, hope
 for the best." noteql treats retrieval as a real systems problem:
 custom storage, from-scratch inverted index, structure-aware
 ranking, and a query layer richer than similarity search.
-
-corollary: the llm is the last thing i build, not the first. the
-retrieval has to be good enough to stand alone as search before an
-llm ever touches it.
 
 ## final product shape
 
@@ -57,6 +42,17 @@ two thin interfaces on top of one real engine:
 the retrieval engine underneath is the actual product. the two
 interfaces are how i demonstrate that good retrieval infrastructure
 serves both traditional search and agentic use cases.
+
+the engine is ui-agnostic. cli and web ui are thin clients over the
+same engine api — same functions, different frontends. sequencing:
+
+- v0–v2 (engine era): cli only. no ui work while retrieval is
+  being built.
+- v3–v4 (interfaces era): local web ui served on localhost —
+  search results view and qa view — over the same engine api.
+
+explicitly not a hosted webpage: the whole point is local-first,
+notes never leave the machine.
 
 ## build order
 
@@ -78,11 +74,61 @@ strict sequence, no jumping ahead:
 each version has to work end-to-end and be useful to me before i
 start the next one.
 
+## design decisions
+
+**storage: hybrid sqlite + custom index format.** metadata lives in
+a single `notes` table in sqlite. the inverted index (posting
+lists) lives in a custom on-disk format i write myself.
+
+metadata is small, structured, relationally shaped (notes↔tags,
+notes↔links), and accessed transactionally — point lookups and
+small filtered scans. that's sqlite's design center: embedded,
+row-oriented, oltp, b-tree indexed, crash-safe. no reason to
+rebuild it.
+
+the posting-list index is custom because that's where the actual
+retrieval engineering lives, and it mirrors how real systems
+(lucene, postgres) separate metadata storage from index storage for
+different access patterns.
+
+alternatives considered:
+
+- duckdb: embedded but columnar/olap. wrong workload — we do
+  transactional row lookups, not analytical scans.
+- rocksdb / lmdb: embedded kv, but metadata is relational and
+  benefits from secondary indexes and sql. no sql either.
+- own row store for metadata: low-return work. the interesting
+  from-scratch layer is the posting-list index, not metadata
+  storage.
+- pure sqlite for everything (index via fts5): outsources the exact
+  layer this project exists to build from scratch.
+
+**incremental indexing is a v1 requirement.** the index must
+support incremental updates, not just bulk rebuild. notes get added
+and edited; unchanged notes should be skipped on re-import. this
+constrains the on-disk format from the start even if the first
+implementation is bulk-rebuild only.
+
+- change detection: content hash per note (see schema below).
+- deletions: tombstones — a deleted-id set filtered at query time,
+  plus periodic compaction / full rebuild — rather than in-place
+  edits to posting lists. lucene-style.
+- full rebuild is acceptable for v1. incremental is the design
+  target the format must not preclude.
+
+**note schema (v1, rough):**
+
+- id: stable identifier
+- path: relative path in the vault
+- title
+- tags
+- links (outbound wikilinks / md links)
+- created / modified timestamps
+- content_hash: for incremental-index change detection
+- body: raw text (or a pointer to it)
+
 ## open design questions (unresolved)
 
-- storage format: own on-disk format vs sqlite vs json. leaning own
-  format for depth of learning and resume story, but haven't
-  committed. will decide when v1 forces it.
 - record granularity: whole notes vs paragraph chunks. leaning whole
   notes for v1 — chunking is easier to add later than to remove.
 - which metadata to index in v1: title, tags, links, path, created
@@ -102,13 +148,3 @@ start the next one.
 - being a note-taking tool (obsidian is the note-taking tool)
 - being a general search engine (this is for personal knowledge
   specifically, and design decisions assume that)
-
-## why this project, honestly
-
-i teach sql. i think about data through a relational lens. i've been
-building a second brain across tools for years and consistently hit
-the "i know i wrote this somewhere" problem. i'm interning on ai
-tooling. the intersection of "databases and query engines" with
-"retrieval systems for agents" is where i actually want to work, and
-this project is the smallest honest thing i can build to demonstrate
-i can work there.
